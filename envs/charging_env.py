@@ -193,15 +193,12 @@ class MultiStationChargingEnv(gym.Env):
         for station_id, capacity in enumerate(self.station_capacities):
             station_spaces[station_id] = spaces.Dict(
                 {
-                    "station_id": scalar_int(low=0, high=max_station_id),
-                    "charge_capacity": scalar_int(low=1, high=max(self.station_capacities)),
                     "charger_status": spaces.Box(
                         low=0.0,
                         high=np.inf,
                         shape=(capacity,),
                         dtype=np.float32,
                     ),
-                    "available_info": spaces.MultiBinary(capacity),
                     "queue_waiting_time": spaces.Sequence(scalar_float(low=0.0)),
                     "queue_demand": spaces.Sequence(scalar_float(low=0.0)),
                 }
@@ -263,9 +260,7 @@ class MultiStationChargingEnv(gym.Env):
                 ),
                 "current_ev": spaces.Dict(
                     {
-                        "vehicle_id": scalar_int(low=-1),
                         "station_id": scalar_int(low=0, high=max_station_id),
-                        "arrival_time": scalar_float(low=0.0),
                         "total_charge_demand": scalar_float(low=0.0),
                         "downstream_stations": spaces.Sequence(spaces.Discrete(self.num_stations)),
                     }
@@ -274,12 +269,6 @@ class MultiStationChargingEnv(gym.Env):
                     low=0.0,
                     high=np.inf,
                     shape=(self.num_stations,),
-                    dtype=np.float32,
-                ),
-                "travel_time_matrix": spaces.Box(
-                    low=0.0,
-                    high=np.inf,
-                    shape=(self.num_stations, self.num_stations),
                     dtype=np.float32,
                 ),
             }
@@ -390,16 +379,17 @@ class MultiStationChargingEnv(gym.Env):
         current_ev = self._to_decision_vehicle(self.pending_vehicle)
         self._travel_time_vehicle_context = self.pending_vehicle
         try:
-            return self._orchestrator.build_observation(
+            observation = self._orchestrator.build_observation(
                 current_ev=current_ev,
                 now=float(self.clock),
             )
+            return self._filter_observation(observation)
         finally:
             self._travel_time_vehicle_context = None
 
     def _terminal_observation(self) -> dict[str, Any]:
         self._travel_time_vehicle_context = None
-        return self._orchestrator.build_observation(
+        observation = self._orchestrator.build_observation(
             current_ev=DecisionVehicle(
                 vehicle_id=-1,
                 station_id=0,
@@ -409,6 +399,65 @@ class MultiStationChargingEnv(gym.Env):
             ),
             now=float(self.clock),
         )
+        return self._filter_observation(observation)
+
+    def _filter_observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+        sim_state = observation["sim_state"]
+        filtered_stations: dict[int, dict[str, Any]] = {}
+        for station_id, station_payload in sorted(sim_state["stations"].items()):
+            filtered_stations[int(station_id)] = {
+                "charger_status": [
+                    float(value) for value in station_payload["charger_status"]
+                ],
+                "queue_waiting_time": tuple(
+                    float(value) for value in station_payload["queue_waiting_time"]
+                ),
+                "queue_demand": tuple(
+                    float(value) for value in station_payload["queue_demand"]
+                ),
+            }
+
+        current_ev = observation["current_ev"]
+        return {
+            "sim_state": {
+                "clock": float(sim_state["clock"]),
+                "stations": filtered_stations,
+                "metrics": {
+                    "ev_served": [
+                        int(value) for value in sim_state["metrics"]["ev_served"]
+                    ],
+                    "ev_queueing": [
+                        int(value) for value in sim_state["metrics"]["ev_queueing"]
+                    ],
+                    "queue_time": [
+                        float(value) for value in sim_state["metrics"]["queue_time"]
+                    ],
+                },
+            },
+            "commitment_features": {
+                "commitment_count": [
+                    int(value) for value in observation["commitment_features"]["commitment_count"]
+                ],
+                "commitment_charge_demand": [
+                    float(value)
+                    for value in observation["commitment_features"]["commitment_charge_demand"]
+                ],
+                "earliest_expected_arrival_eta": [
+                    float(value)
+                    for value in observation["commitment_features"]["earliest_expected_arrival_eta"]
+                ],
+            },
+            "current_ev": {
+                "station_id": int(current_ev["station_id"]),
+                "total_charge_demand": float(current_ev["total_charge_demand"]),
+                "downstream_stations": tuple(
+                    int(station_id) for station_id in current_ev["downstream_stations"]
+                ),
+            },
+            "future_demand": [
+                float(value) for value in observation["future_demand"]
+            ],
+        }
 
     def _coerce_action(self, action: Any) -> int:
         try:

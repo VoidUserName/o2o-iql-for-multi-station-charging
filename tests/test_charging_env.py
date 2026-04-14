@@ -66,15 +66,15 @@ class ChargingEnvTests(unittest.TestCase):
                 "commitment_features",
                 "current_ev",
                 "future_demand",
-                "travel_time_matrix",
             },
         )
-        self.assertEqual(observation["current_ev"]["vehicle_id"], 1)
         self.assertEqual(observation["current_ev"]["station_id"], 0)
+        self.assertEqual(observation["current_ev"]["total_charge_demand"], 10.0)
         self.assertEqual(observation["current_ev"]["downstream_stations"], (2,))
         self.assertEqual(observation["sim_state"]["clock"], 0.0)
         self.assertEqual(observation["sim_state"]["metrics"]["queue_time"], [0.0] * 7)
-        self.assertEqual(observation["travel_time_matrix"][0][2], 3.0)
+        station_payload = observation["sim_state"]["stations"][0]
+        self.assertEqual(set(station_payload.keys()), {"charger_status", "queue_waiting_time", "queue_demand"})
         self.assertEqual(info["total_wait"], 0.0)
 
     def test_action_masks_match_maskable_action_enumerator(self) -> None:
@@ -135,7 +135,8 @@ class ChargingEnvTests(unittest.TestCase):
         self.assertFalse(truncated)
         self.assertEqual(info["queue_time_delta"], 0.0)
         self.assertNotIn("reward_mode", info)
-        self.assertEqual(observation["current_ev"]["vehicle_id"], 2)
+        self.assertEqual(observation["current_ev"]["station_id"], 0)
+        self.assertEqual(observation["current_ev"]["total_charge_demand"], 4.0)
 
         _observation, reward, terminated, truncated, info = env.step(no_split_action_int(n_bins=5))
         self.assertEqual(reward, -4.0)
@@ -143,6 +144,8 @@ class ChargingEnvTests(unittest.TestCase):
         self.assertFalse(truncated)
         self.assertEqual(info["queue_time_delta"], 4.0)
         self.assertNotIn("reward_mode", info)
+        self.assertEqual(_observation["current_ev"]["station_id"], 0)
+        self.assertEqual(_observation["current_ev"]["total_charge_demand"], 0.0)
         self.assertEqual(info["total_wait"], 4.0)
 
     def test_split_action_submits_second_leg_arrival_without_another_agent_decision(self) -> None:

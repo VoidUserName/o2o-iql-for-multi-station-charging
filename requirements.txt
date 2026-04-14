@@ -1,0 +1,8 @@
+# Minimal third-party dependencies inferred from the current codebase.
+# Covers simulator, environment, RL fine-tuning, and imitation training scripts.
+
+numpy
+gymnasium
+torch
+stable-baselines3
+sb3-contrib
