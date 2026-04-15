@@ -8,12 +8,7 @@ import os
 from collections import Counter, deque
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import torch
 
 from train.iql.agent import DiscreteIQLAgent, IQLUpdateMetrics
@@ -42,23 +37,6 @@ def _append_jsonl(path: str, payload: dict) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
-def _load_metrics_dataframe(metrics_path: str) -> pd.DataFrame:
-    records: list[dict] = []
-    with open(metrics_path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            records.append(json.loads(line))
-    if not records:
-        return pd.DataFrame()
-    return pd.DataFrame.from_records(records)
-
-
-def _rolling_mean(values: pd.Series, window: int = 20) -> pd.Series:
-    return values.rolling(window=window, min_periods=1).mean()
-
-
 def _mean_metrics(window: list[IQLUpdateMetrics]) -> dict[str, float]:
     if not window:
         return {}
@@ -69,195 +47,6 @@ def _mean_metrics(window: list[IQLUpdateMetrics]) -> dict[str, float]:
         "mean_advantage": float(np.mean([item.mean_advantage for item in window])),
         "mean_weight": float(np.mean([item.mean_weight for item in window])),
     }
-
-
-# def _export_training_artifacts(
-#     metrics_path: str,
-#     log_dir: str,
-#     config: dict[str, object],
-#     final_checkpoint: str,
-# ) -> None:
-#     df = _load_metrics_dataframe(metrics_path)
-#     if df.empty:
-#         return
-
-#     csv_path = os.path.join(log_dir, "metrics.csv")
-#     df.to_csv(csv_path, index=False)
-
-#     summary: dict[str, object] = {
-#         "metrics_path": metrics_path,
-#         "csv_path": csv_path,
-#         "final_checkpoint": final_checkpoint,
-#         "num_records": int(len(df)),
-#         "stage_counts": {
-#             str(stage): int(count)
-#             for stage, count in df["stage"].value_counts(dropna=False).items()
-#         },
-#         "config": config,
-#     }
-
-#     eval_df = df[df["stage"] == "eval"].copy()
-#     offline_eval_df = df[df["stage"] == "offline_eval"].copy()
-#     episode_df = df[df["stage"] == "online_episode"].copy()
-#     train_df = df[df["stage"].isin(["offline", "online"])].copy()
-#     priority_df = df[df["stage"] == "priority_refresh"].copy()
-
-#     for frame in (eval_df, offline_eval_df, episode_df, train_df, priority_df):
-#         if "progress" in frame.columns:
-#             frame.sort_values("progress", inplace=True)
-
-#     if not eval_df.empty and "mean_reward" in eval_df.columns:
-#         summary["best_eval_mean_reward"] = float(eval_df["mean_reward"].max())
-#         summary["final_eval_mean_reward"] = float(eval_df["mean_reward"].iloc[-1])
-#     if not offline_eval_df.empty and "mean_reward" in offline_eval_df.columns:
-#         summary["offline_eval_mean_reward"] = float(offline_eval_df["mean_reward"].iloc[-1])
-
-#     fig, axes = plt.subplots(3, 1, figsize=(14, 14), constrained_layout=True)
-
-#     ax = axes[0]
-#     if not episode_df.empty and "episode_return" in episode_df.columns:
-#         ax.plot(
-#             episode_df["progress"],
-#             episode_df["episode_return"],
-#             color="#4C78A8",
-#             alpha=0.35,
-#             linewidth=1.0,
-#             label="episode return",
-#         )
-#         ax.plot(
-#             episode_df["progress"],
-#             _rolling_mean(episode_df["episode_return"], window=20),
-#             color="#4C78A8",
-#             linewidth=2.0,
-#             label="episode return (rolling mean)",
-#         )
-#     if not eval_df.empty and "mean_reward" in eval_df.columns:
-#         ax.plot(
-#             eval_df["progress"],
-#             eval_df["mean_reward"],
-#             color="#F58518",
-#             marker="o",
-#             linewidth=1.5,
-#             label="eval mean reward",
-#         )
-#     if not offline_eval_df.empty and "mean_reward" in offline_eval_df.columns:
-#         ax.scatter(
-#             [0],
-#             [float(offline_eval_df["mean_reward"].iloc[-1])],
-#             color="#54A24B",
-#             marker="*",
-#             s=180,
-#             label="offline eval",
-#             zorder=5,
-#         )
-#     ax.set_title("Reward Curves")
-#     ax.set_xlabel("training progress")
-#     ax.set_ylabel("reward")
-#     ax.grid(True, alpha=0.25)
-#     ax.legend(loc="best")
-
-#     ax = axes[1]
-#     if not train_df.empty:
-#         if "actor_loss" in train_df.columns:
-#             ax.plot(
-#                 train_df["progress"],
-#                 train_df["actor_loss"],
-#                 color="#E45756",
-#                 alpha=0.35,
-#                 linewidth=1.0,
-#                 label="actor loss",
-#             )
-#             ax.plot(
-#                 train_df["progress"],
-#                 _rolling_mean(train_df["actor_loss"], window=20),
-#                 color="#E45756",
-#                 linewidth=2.0,
-#             )
-#         if "critic_loss" in train_df.columns:
-#             ax.plot(
-#                 train_df["progress"],
-#                 train_df["critic_loss"],
-#                 color="#72B7B2",
-#                 alpha=0.35,
-#                 linewidth=1.0,
-#                 label="critic loss",
-#             )
-#             ax.plot(
-#                 train_df["progress"],
-#                 _rolling_mean(train_df["critic_loss"], window=20),
-#                 color="#72B7B2",
-#                 linewidth=2.0,
-#             )
-#         if "value_loss" in train_df.columns:
-#             ax.plot(
-#                 train_df["progress"],
-#                 train_df["value_loss"],
-#                 color="#54A24B",
-#                 alpha=0.35,
-#                 linewidth=1.0,
-#                 label="value loss",
-#             )
-#             ax.plot(
-#                 train_df["progress"],
-#                 _rolling_mean(train_df["value_loss"], window=20),
-#                 color="#54A24B",
-#                 linewidth=2.0,
-#             )
-#     ax.set_title("Loss Curves")
-#     ax.set_xlabel("training progress")
-#     ax.set_ylabel("loss")
-#     ax.grid(True, alpha=0.25)
-#     ax.legend(loc="best")
-
-#     ax = axes[2]
-#     if not priority_df.empty:
-#         if "classifier_loss" in priority_df.columns:
-#             ax.plot(
-#                 priority_df["progress"],
-#                 priority_df["classifier_loss"],
-#                 color="#B279A2",
-#                 linewidth=1.5,
-#                 label="priority classifier loss",
-#             )
-#         if "priority_effective_sample_size" in priority_df.columns:
-#             ax.plot(
-#                 priority_df["progress"],
-#                 priority_df["priority_effective_sample_size"],
-#                 color="#9D755D",
-#                 linewidth=1.5,
-#                 label="priority ESS",
-#             )
-#         if "priority_top" in priority_df.columns:
-#             ax.plot(
-#                 priority_df["progress"],
-#                 priority_df["priority_top"],
-#                 color="#F28E2B",
-#                 linewidth=1.5,
-#                 label="priority top",
-#             )
-#     if not train_df.empty and "mean_advantage" in train_df.columns:
-#         ax.plot(
-#             train_df["progress"],
-#             train_df["mean_advantage"],
-#             color="#4E79A7",
-#             alpha=0.5,
-#             linewidth=1.0,
-#             label="mean advantage",
-#         )
-#     ax.set_title("Auxiliary Training Signals")
-#     ax.set_xlabel("training progress")
-#     ax.set_ylabel("value")
-#     ax.grid(True, alpha=0.25)
-#     ax.legend(loc="best")
-
-#     plot_path = os.path.join(log_dir, "training_curves.png")
-#     fig.savefig(plot_path, dpi=160)
-#     plt.close(fig)
-
-#     summary["plot_path"] = plot_path
-#     summary_path = os.path.join(log_dir, "training_summary.json")
-#     with open(summary_path, "w", encoding="utf-8") as handle:
-#         json.dump(summary, handle, ensure_ascii=False, indent=2)
 
 
 def run_offline_pretraining(
@@ -696,23 +485,6 @@ def main() -> None:
         },
     )
     print(f"  Saved final checkpoint -> {final_path}")
-
-    _export_training_artifacts(
-        metrics_path=metrics_path,
-        log_dir=args.log_dir,
-        config={
-            "seed": int(args.seed),
-            "device": args.device,
-            "offline_epochs": int(args.offline_epochs),
-            "online_steps": int(args.online_steps),
-            "batch_size": int(args.batch_size),
-            "n_bins": int(args.n_bins),
-            "max_queue_len": int(args.max_queue_len),
-            "train_data_dir": args.train_data_dir,
-            "eval_data_dir": args.eval_data_dir or args.train_data_dir,
-        },
-        final_checkpoint=final_path,
-    )
 
 
 if __name__ == "__main__":
