@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(python -c \"import ast; ast.parse\\(open\\('tools/run_o2o_iql_sweep.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "Bash(python -m py_compile tools/run_o2o_iql_sweep.py)"
+      "Bash(python -m py_compile tools/run_o2o_iql_sweep.py)",
+      "Bash(python3 -c ':*)"
     ]
   }
 }
