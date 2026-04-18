@@ -378,10 +378,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pretrain_only", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--max_queue_len", type=int, default=10)
     parser.add_argument("--log_interval", type=int, default=5_000)
     parser.add_argument("--eval_freq", type=int, default=50_000)
     parser.add_argument("--checkpoint_freq", type=int, default=50_000)
     parser.add_argument("--online_steps", type=int, default=500_000)
+    parser.add_argument("--online_buffer_size", type=int, default=20_000)
     parser.add_argument("--offline_epochs", type=int, default=100)
     parser.add_argument("--n_eval_episodes", type=int, default=10)
     parser.add_argument(
@@ -408,8 +410,10 @@ def main() -> None:
         demand_dir=str(Path(args.offline_dataset_root) / "demand"),
         solution_dir=str(Path(args.offline_dataset_root) / "solutions"),
         train_data_root=str(Path(args.train_data_root)),
+        max_queue_len=int(args.max_queue_len),
         offline_epochs=int(args.offline_epochs),
         online_steps=int(args.online_steps),
+        online_buffer_size=int(args.online_buffer_size),
         n_eval_episodes=int(args.n_eval_episodes),
         eval_freq=int(args.eval_freq),
         checkpoint_freq=int(args.checkpoint_freq),
