@@ -2,8 +2,9 @@
 
 Currently implemented baselines:
     - all-no-split: always choose the canonical no-split action
-    - station-assignment: choose the downstream station with the shortest queue
-      and route all charging there (minimise first-station fraction)
+    - station-assignment: choose the route station (including the current
+      station) with the smallest queued waiting time and complete the full
+      charge there
     - greedy-split: choose among the current station and downstream stations
       by shortest queue, then by nearest travel time; if the current station
       wins, take no-split, otherwise take a valid split toward the selected
@@ -17,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import os
 from pathlib import Path
@@ -26,12 +28,18 @@ from typing import Callable
 import numpy as np
 
 from data.env_data import CAPACITY, MIN_SEG, TRAVEL_MATRIX
-from envs.charging_env import EpisodeBankChargingEnv, travel_time_fn_from_matrix
+from envs.charging_env import (
+    EpisodeBankChargingEnv,
+    SecondLegArrivalEvent,
+    travel_time_fn_from_matrix,
+)
 from envs.maskable_actions import (
     decode_maskable_action,
     iter_valid_maskable_actions,
     no_split_action_int,
 )
+from simulator.commitment import Commitment
+from simulator.models import ChargingRequest
 from simulator.orchestrator import load_demand_vehicles_from_csv
 
 
@@ -94,66 +102,129 @@ def _all_no_split_action(env: EpisodeBankChargingEnv) -> int:
 
 
 def _station_assignment_action(env: EpisodeBankChargingEnv) -> int:
-    """Assign the vehicle to the downstream station with the shortest queue for full charging.
+    """Return a placeholder action for station-assignment.
+
+    The actual station-assignment baseline is evaluated via a direct-routing
+    helper so it can bypass maskable-action feasibility constraints and charge
+    the full demand at the selected target station.
+    """
+    return no_split_action_int(n_bins=env.n_bins, num_stations=env.num_stations)
+
+
+def _station_assignment_target_station(env: EpisodeBankChargingEnv) -> int:
+    """Choose the route station with the smallest queued waiting time.
 
     The heuristic is:
-    1. Look only at downstream stations for the pending vehicle.
-    2. Prefer the station with the smallest queue length.
-    3. Break ties by smaller total queued waiting time, then route order.
-    4. For that station, pick a valid split action with the smallest frac_bin
-       (i.e. maximise charging at the downstream station).
-    5. Fall back to no-split if no valid split exists.
+    1. Look at all valid stations on the route, including the current station.
+    2. Prefer the station with the smallest total queued waiting time.
+    3. Break ties by shorter travel time from the current station, then station id.
     """
     if env.pending_vehicle is None:
-        return no_split_action_int(n_bins=env.n_bins, num_stations=env.num_stations)
+        return env.num_stations
 
-    downstream_stations = [
+    route = [
         int(station_id)
-        for station_id in env.pending_vehicle.route[1:]
+        for station_id in env.pending_vehicle.route
         if 0 <= int(station_id) < env.num_stations
     ]
-    if not downstream_stations:
-        return no_split_action_int(n_bins=env.n_bins, num_stations=env.num_stations)
+    if not route:
+        return env.num_stations
+
+    current_station = int(route[0])
+    candidate_stations: list[int] = []
+    seen: set[int] = set()
+    for station_id in route:
+        if station_id in seen:
+            continue
+        seen.add(station_id)
+        candidate_stations.append(int(station_id))
 
     observation = env._current_observation()  # noqa: SLF001 - evaluation helper
     station_payloads = observation["sim_state"]["stations"]
 
-    valid_split_actions: dict[int, list[tuple[int, int]]] = {}
-    for action in iter_valid_maskable_actions(
-        route=env.pending_vehicle.route,
-        n_bins=env.n_bins,
-        total_duration=float(env.pending_vehicle.duration),
-        t_first_min=float(env.min_first_charge),
-        t_second_min=float(env.min_second_charge),
-        num_stations=env.num_stations,
-    ):
-        second_choice, frac_bin = decode_maskable_action(
-            action_int=action,
-            n_bins=env.n_bins,
-            num_stations=env.num_stations,
-        )
-        if second_choice == env.num_stations:
-            continue
-        valid_split_actions.setdefault(int(second_choice), []).append((int(action), int(frac_bin)))
-
-    if not valid_split_actions:
-        return no_split_action_int(n_bins=env.n_bins, num_stations=env.num_stations)
-
-    route_order = {station_id: idx for idx, station_id in enumerate(downstream_stations)}
-
-    def _queue_score(station_id: int) -> tuple[int, float, int]:
+    def _queue_score(station_id: int) -> tuple[float, float, int]:
         queue_waiting_time = station_payloads[station_id]["queue_waiting_time"]
+        travel_time = float(TRAVEL_MATRIX[current_station][station_id])
         return (
-            len(queue_waiting_time),
             float(sum(float(value) for value in queue_waiting_time)),
-            int(route_order.get(station_id, len(route_order))),
+            travel_time,
+            int(station_id),
         )
 
-    chosen_station = min(valid_split_actions, key=_queue_score)
-    split_candidates = valid_split_actions[chosen_station]
-    # Minimise frac_bin so that as much charging as possible happens at the downstream station.
-    chosen_action = min(split_candidates, key=lambda item: (item[1], item[0]))[0]
-    return int(chosen_action)
+    return int(min(candidate_stations, key=_queue_score))
+
+
+def _station_assignment_step(env: EpisodeBankChargingEnv):
+    """Directly route the full charging demand to the selected station.
+
+    This evaluation-only helper bypasses the maskable action space so the
+    station-assignment baseline can submit the entire charge at the chosen
+    station, even when that target is downstream.
+    """
+    if env.pending_vehicle is None:
+        raise AssertionError("No pending decision is available.")
+
+    vehicle = env.pending_vehicle
+    old_queue_total = env._queue_time_total(env.clock)  # noqa: SLF001 - evaluation helper
+    chosen_station = int(_station_assignment_target_station(env))
+    current_station = int(vehicle.route[0])
+
+    if chosen_station == current_station:
+        request = ChargingRequest(
+            vehicle_id=int(vehicle.vid),
+            station_id=int(current_station),
+            charge_duration=float(vehicle.duration),
+            arrival_time=float(env.clock),
+        )
+        assignment = env._sim.submit_arrival(request)  # noqa: SLF001 - evaluation helper
+        env._submitted_requests.append(request)  # noqa: SLF001 - evaluation helper
+        env.total_wait += float(assignment.wait_time)
+        env._record_vehicle_wait(vehicle.vid, assignment.wait_time)  # noqa: SLF001 - evaluation helper
+    else:
+        arrival_time = float(env.clock) + env._travel_time_with_vehicle(  # noqa: SLF001 - evaluation helper
+            from_station=current_station,
+            to_station=int(chosen_station),
+            vehicle=vehicle,
+        )
+        commitment = Commitment(
+            vehicle_id=int(vehicle.vid),
+            target_station_id=int(chosen_station),
+            expected_arrival_time=float(arrival_time),
+            planned_second_charge_duration=float(vehicle.duration),
+            created_at=float(env.clock),
+        )
+        env._orchestrator.commitment_store.add(commitment)  # noqa: SLF001 - evaluation helper
+        heapq.heappush(
+            env._second_leg_events,  # noqa: SLF001 - evaluation helper
+            SecondLegArrivalEvent(
+                time=float(arrival_time),
+                priority=0,
+                vehicle_id=int(vehicle.vid),
+            ),
+        )
+
+    env.pending_vehicle = None
+    env._advance_until_next_decision()  # noqa: SLF001 - evaluation helper
+
+    terminated = env._is_terminated()  # noqa: SLF001 - evaluation helper
+    truncated = False
+    new_queue_total = env._queue_time_total(env.clock)  # noqa: SLF001 - evaluation helper
+    queue_time_delta = float(new_queue_total - old_queue_total)
+    reward = -float(env.reward_scale) * queue_time_delta
+
+    info = {
+        "clock": float(env.clock),
+        "queue_time_total": float(new_queue_total),
+        "queue_time_delta": float(queue_time_delta),
+        "total_wait": float(env.total_wait),
+        "vehicle_total_wait": float(env._vehicle_total_wait.get(int(vehicle.vid), 0.0)),  # noqa: SLF001 - evaluation helper
+        "invalid_action": False,
+        "vid": int(vehicle.vid),
+    }
+    if terminated:
+        info.update(env.compute_episode_metrics())
+
+    return env._current_observation(), reward, terminated, truncated, info
 
 
 def _greedy_split_action(env: EpisodeBankChargingEnv) -> int:
@@ -250,8 +321,11 @@ def _evaluate_single_episode(
         episode_invalid_actions = 0
 
         while env.pending_vehicle is not None:
-            action = int(baseline_fn(env))
-            _, reward, terminated, truncated, step_info = env.step(action)
+            if baseline_name == "station-assignment":
+                _, reward, terminated, truncated, step_info = _station_assignment_step(env)
+            else:
+                action = int(baseline_fn(env))
+                _, reward, terminated, truncated, step_info = env.step(action)
             episode_reward += float(reward)
             episode_length += 1
             episode_invalid_actions += int(bool(step_info.get("invalid_action", False)))
